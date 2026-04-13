@@ -14,9 +14,10 @@ if getattr(sys, 'frozen', False):
     # we must manually add torch/lib to DLL search paths.
     torch_lib = os.path.join(sys._MEIPASS, "torch", "lib")
     if os.path.exists(torch_lib):
-        os.environ["PATH"] = torch_lib + os.pathsep + os.environ.get("PATH", "")
+        os.environ["PATH"] = torch_lib + os.pathsep + sys._MEIPASS + os.pathsep + os.environ.get("PATH", "")
         try:
             os.add_dll_directory(torch_lib)
+            os.add_dll_directory(sys._MEIPASS)  # Allows c10.dll to find MSVCP140.dll
         except Exception:
             pass
 # ----------------------------------------------
@@ -114,7 +115,7 @@ def download_ffmpeg():
             try: shutil.rmtree(temp_dir)
             except: pass
 
-def run_transcription(video_file, model_name="medium", output_dir=".", use_fp16=False):
+def run_transcription(video_file, model_name="medium", output_dir=".", use_fp16=False, target_device="cuda"):
     download_ffmpeg()
     
     # Add current directory AND bundle directory to PATH so whisper can find ffmpeg.exe
@@ -138,12 +139,21 @@ def run_transcription(video_file, model_name="medium", output_dir=".", use_fp16=
         import whisper
         from whisper.utils import get_writer
 
-    # Check for CUDA support
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cpu" and use_fp16:
-        print("\n[!] WARNING: FP16 is not supported on CPU. Using FP32 instead.")
-        print("[!] To use GPU/FP16, install PyTorch with CUDA support: pip install torch --index-url https://download.pytorch.org/whl/cu121")
-        use_fp16 = False
+    # Check for CUDA support and apply user choice
+    if use_fp16:
+        if torch.cuda.is_available():
+            device = "cuda"
+        else:
+            print("\n[!] WARNING: FP16 is not supported on CPU. Using FP32 instead.")
+            print("[!] To use GPU/FP16, ensure PyTorch with CUDA is installed correctly.")
+            device = "cpu"
+            use_fp16 = False
+    else:
+        device = target_device
+
+    if device == "cuda" and not torch.cuda.is_available():
+        print("\n[!] WARNING: Selected GPU, but CUDA is not available. Falling back to CPU.")
+        device = "cpu"
 
     print(f"Target Device: {device.upper()}")
     print(f"Loading {model_name} Whisper model...")
@@ -212,7 +222,28 @@ class DragDropApp(QWidget):
         model_layout.setStretch(1, 1)
         main_layout.addLayout(model_layout)
         
-        # Precision Dropdown
+        # --- Hardware Status Indicator ---
+        self.hw_layout = QHBoxLayout()
+        cuda_ready = False
+        gpu_name = "GPU (Not Detected)"
+        try:
+            import torch
+            cuda_ready = torch.cuda.is_available()
+            if cuda_ready:
+                gpu_name = f"GPU - {torch.cuda.get_device_name(0)}"
+        except:
+            pass
+            
+        status_text = "🟢 Hardware Acceleration (CUDA): Available" if cuda_ready else "🔴 Hardware Acceleration (CUDA): NOT FOUND"
+        status_color = "#28a745" if cuda_ready else "#dc3545"
+        
+        self.hw_label = QLabel(status_text)
+        self.hw_label.setFont(QFont("Arial", 9, QFont.Bold))
+        self.hw_label.setStyleSheet(f"color: {status_color}; padding: 5px; background-color: {status_color}22; border-radius: 4px;")
+        self.hw_layout.addWidget(self.hw_label)
+        main_layout.addLayout(self.hw_layout)
+
+        # Precision & Device Dropdowns
         precision_layout = QHBoxLayout()
         precision_layout.setSpacing(10)
         
@@ -225,37 +256,55 @@ class DragDropApp(QWidget):
         precision_combo_layout.setSpacing(2)
         
         self.precision_combo = QComboBox()
-        self.precision_combo.addItems(["FP32", "FP16"])
+        self.precision_combo.addItems(["FP32 - (CPU recommended)", "FP16 - (GPU only)"])
         self.precision_combo.setCurrentText("FP32")
         self.precision_combo.setStyleSheet("padding: 6px; border: 1px solid #cce0ff; border-radius: 5px; background-color: #e6f2ff; color: #333;")
+        self.precision_combo.currentTextChanged.connect(self.on_precision_changed)
         precision_combo_layout.addWidget(self.precision_combo)
         
-        self.precision_subText = QLabel("FP32 uses CPU (Better accuracy, slower). FP16 uses GPU (Slightly less accuracy, much faster).")
+        self.precision_subText = QLabel("FP32 (Better accuracy, slower). FP16 (Slightly less accuracy, much faster).")
         self.precision_subText.setFont(QFont("Arial", 8))
         self.precision_subText.setStyleSheet("color: #666;")
         precision_combo_layout.addWidget(self.precision_subText)
         
         precision_layout.addLayout(precision_combo_layout)
-        precision_layout.setStretch(1, 1)
-        main_layout.addLayout(precision_layout)
         
-        # --- Hardware Status Indicator ---
-        self.hw_layout = QHBoxLayout()
-        cuda_ready = False
+        # --- Device Detection & Dropdown ---
+        cpu_name = "CPU"
+        import platform
         try:
-            import torch
-            cuda_ready = torch.cuda.is_available()
+            import winreg
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"HARDWARE\DESCRIPTION\System\CentralProcessor\0") as key:
+                cpu_name = winreg.QueryValueEx(key, "ProcessorNameString")[0].strip()
         except:
-            pass
+            cpu_name = f"CPU ({platform.processor()})"
             
-        status_text = "🟢 Hardware Acceleration (CUDA): Available" if cuda_ready else "🔴 Hardware Acceleration (CUDA): NOT FOUND (Using CPU)"
-        status_color = "#28a745" if cuda_ready else "#dc3545"
+        self.device_label = QLabel("🖥️ Device :")
+        self.device_label.setFont(QFont("Arial", 11))
+        self.device_label.setStyleSheet("color: #333;")
+        precision_layout.addWidget(self.device_label)
         
-        self.hw_label = QLabel(status_text)
-        self.hw_label.setFont(QFont("Arial", 9, QFont.Bold))
-        self.hw_label.setStyleSheet(f"color: {status_color}; padding: 5px; background-color: {status_color}22; border-radius: 4px;")
-        self.hw_layout.addWidget(self.hw_label)
-        main_layout.addLayout(self.hw_layout)
+        device_combo_layout = QVBoxLayout()
+        device_combo_layout.setSpacing(2)
+        
+        self.device_combo = QComboBox()
+        self.device_combo.addItem(f"CPU - {cpu_name}" if not cpu_name.startswith("CPU") else cpu_name, "cpu")
+        if cuda_ready:
+            self.device_combo.addItem(gpu_name, "cuda")
+        self.device_combo.setCurrentIndex(0)
+        self.device_combo.setStyleSheet("padding: 6px; border: 1px solid #cce0ff; border-radius: 5px; background-color: #e6f2ff; color: #333;")
+        device_combo_layout.addWidget(self.device_combo)
+        
+        self.device_subText = QLabel("Select processing device.")
+        self.device_subText.setFont(QFont("Arial", 8))
+        self.device_subText.setStyleSheet("color: #666;")
+        device_combo_layout.addWidget(self.device_subText)
+        
+        precision_layout.addLayout(device_combo_layout)
+        
+        precision_layout.setStretch(1, 1)
+        precision_layout.setStretch(3, 1)
+        main_layout.addLayout(precision_layout)
         
         # --- 2. Drag & Drop Area ---
         self.drop_label = QLabel("📄 Drag & Drop a Video File Here")
@@ -343,6 +392,19 @@ class DragDropApp(QWidget):
         if folder:
             self.loc_input.setText(folder)
 
+    def on_precision_changed(self, text):
+        if text == "FP16":
+            index = self.device_combo.findData("cuda")
+            if index >= 0:
+                self.device_combo.setCurrentIndex(index)
+                self.device_combo.setEnabled(False)
+                self.device_combo.setStyleSheet("padding: 6px; border: 1px solid #ccc; border-radius: 5px; background-color: #f0f0f0; color: #888;")
+            else:
+                self.device_combo.setEnabled(False)
+        else:
+            self.device_combo.setEnabled(True)
+            self.device_combo.setStyleSheet("padding: 6px; border: 1px solid #cce0ff; border-radius: 5px; background-color: #e6f2ff; color: #333;")
+
     def start_generation(self):
         if not self.target_video_file:
             return
@@ -350,18 +412,19 @@ class DragDropApp(QWidget):
         model_choice = self.model_combo.currentText()
         out_dir = self.loc_input.text()
         use_fp16 = self.precision_combo.currentText() == "FP16"
+        target_device = self.device_combo.currentData()
         
         self.start_btn.setEnabled(False)
         self.start_btn.setText("Generating... (Check console below)")
         self.start_btn.setStyleSheet("padding: 12px; background-color: #aaaaaa; color: white; border: none; border-radius: 6px;")
         
-        print(f"\n{'='*50}\nStarting: {os.path.basename(self.target_video_file)}\nModel: {model_choice}\nOutput: {out_dir}\nFP16: {use_fp16}\n{'='*50}\n")
+        print(f"\n{'='*50}\nStarting: {os.path.basename(self.target_video_file)}\nModel: {model_choice}\nOutput: {out_dir}\nFP16: {use_fp16}\nDevice: {target_device}\n{'='*50}\n")
         
-        threading.Thread(target=self.process_file, args=(self.target_video_file, model_choice, out_dir, use_fp16), daemon=True).start()
+        threading.Thread(target=self.process_file, args=(self.target_video_file, model_choice, out_dir, use_fp16, target_device), daemon=True).start()
 
-    def process_file(self, file_path, model_choice, out_dir, use_fp16):
+    def process_file(self, file_path, model_choice, out_dir, use_fp16, target_device):
         try:
-            run_transcription(file_path, model_choice, out_dir, use_fp16)
+            run_transcription(file_path, model_choice, out_dir, use_fp16, target_device)
         except Exception as e:
             print(f"Error occurred: {e}")
         finally:
