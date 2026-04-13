@@ -5,6 +5,7 @@ import subprocess
 import sys
 import threading
 import time
+import shutil
 
 # Load torch to memory BEFORE PyQt5 to avoid a known DLL initialization conflict (WinError 1114)
 try:
@@ -27,44 +28,71 @@ except ImportError:
 def download_ffmpeg():
     url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
     zip_path = "ffmpeg.zip"
+    temp_dir = "ffmpeg_temp"
     
     if os.path.exists("ffmpeg.exe"):
-        # Check if the file is older than 30 days
-        file_age_days = (time.time() - os.path.getmtime("ffmpeg.exe")) / (60 * 60 * 24)
-        if file_age_days < 30:
-            print(f"ffmpeg.exe is up to date ({int(file_age_days)} days old).")
-            return
-        else:
-            print("ffmpeg.exe is more than 30 days old. Checking for update...")
-            # Delete old version to force download
-            try:
-                os.remove("ffmpeg.exe")
-            except Exception as e:
-                print(f"Notice: Could not remove old ffmpeg.exe ({e}). Using existing version.")
+        try:
+            # Check if the file is older than 30 days
+            file_age_days = (time.time() - os.path.getmtime("ffmpeg.exe")) / (60 * 60 * 24)
+            if file_age_days < 30:
+                print(f"ffmpeg.exe is up to date ({int(file_age_days)} days old).")
                 return
+            else:
+                print("ffmpeg.exe is more than 30 days old. Checking for update...")
+                # Try to remove old version to force download
+                os.remove("ffmpeg.exe")
+        except PermissionError:
+            print("Notice: ffmpeg.exe is currently in use or protected. Skipping update.")
+            return
+        except Exception as e:
+            print(f"Notice: Could not check/remove old ffmpeg.exe ({e}). Using existing version.")
+            return
 
     print("Downloading/Updating ffmpeg.exe (this ensures you have the latest codecs)...")
-    urllib.request.urlretrieve(url, zip_path)
-    print("Extracting ffmpeg...")
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall("ffmpeg_temp")
-    
-    exe_path = None
-    for root, dirs, files in os.walk("ffmpeg_temp"):
-        for file in files:
-            if file == "ffmpeg.exe":
-                exe_path = os.path.join(root, file)
-                break
-    
-    if exe_path:
-        os.rename(exe_path, "ffmpeg.exe")
-        print("ffmpeg.exe ready.")
-    else:
-        print("Failed to find ffmpeg.exe in the downloaded archive.")
-
     try:
-        os.remove(zip_path)
-    except: pass
+        # Step 1: Download
+        urllib.request.urlretrieve(url, zip_path)
+        if not os.path.exists(zip_path) or os.path.getsize(zip_path) < 1000:
+            raise Exception("Downloaded zip file is missing or too small (possible network error).")
+        
+        # Step 2: Extract
+        print("Extracting ffmpeg...")
+        if os.path.exists(temp_dir):
+            shutil.rmtree(temp_dir)
+            
+        with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+            # Test zip integrity
+            zip_ref.testzip()
+            zip_ref.extractall(temp_dir)
+        
+        # Step 3: Find and Move exe
+        exe_path = None
+        for root, dirs, files in os.walk(temp_dir):
+            for file in files:
+                if file == "ffmpeg.exe":
+                    exe_path = os.path.join(root, file)
+                    break
+        
+        if exe_path:
+            shutil.move(exe_path, "ffmpeg.exe")
+            print("ffmpeg.exe ready.")
+        else:
+            print("Failed to find ffmpeg.exe in the downloaded archive.")
+
+    except zipfile.BadZipFile:
+        print("Error: The downloaded ffmpeg.zip is corrupt. Please try running the script again.")
+    except PermissionError as e:
+        print(f"Permission Error: {e}. Try running the script as Administrator or check folder permissions.")
+    except Exception as e:
+        print(f"An error occurred while setting up FFmpeg: {e}")
+    finally:
+        # Cleanup
+        if os.path.exists(zip_path):
+            try: os.remove(zip_path)
+            except: pass
+        if os.path.exists(temp_dir):
+            try: shutil.rmtree(temp_dir)
+            except: pass
 
 def run_transcription(video_file, model_name="medium", output_dir=".", use_fp16=False):
     download_ffmpeg()
