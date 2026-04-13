@@ -7,6 +7,20 @@ import threading
 import time
 import shutil
 
+# ---- FIX FOR WINERROR 1114 IN PYINSTALLER ----
+if getattr(sys, 'frozen', False):
+    # PyTorch needs to find its own C++ libraries and OpenMP. 
+    # Because we excluded the hook during build to prevent build access violation, 
+    # we must manually add torch/lib to DLL search paths.
+    torch_lib = os.path.join(sys._MEIPASS, "torch", "lib")
+    if os.path.exists(torch_lib):
+        os.environ["PATH"] = torch_lib + os.pathsep + os.environ.get("PATH", "")
+        try:
+            os.add_dll_directory(torch_lib)
+        except Exception:
+            pass
+# ----------------------------------------------
+
 # Load torch to memory BEFORE PyQt5 to avoid a known DLL initialization conflict (WinError 1114)
 try:
     import torch
