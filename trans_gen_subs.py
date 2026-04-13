@@ -25,6 +25,12 @@ except ImportError:
     from PyQt5.QtCore import pyqtSignal, QObject, Qt, QMetaObject, Q_ARG
     from PyQt5.QtGui import QFont, QColor
 
+def get_bundle_dir():
+    """Returns the base directory for resources. Works for both source and PyInstaller bundle."""
+    if getattr(sys, 'frozen', False):
+        return sys._MEIPASS
+    return os.path.abspath(".")
+
 def download_ffmpeg():
     url = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-gpl.zip"
     zip_path = "ffmpeg.zip"
@@ -97,8 +103,17 @@ def download_ffmpeg():
 def run_transcription(video_file, model_name="medium", output_dir=".", use_fp16=False):
     download_ffmpeg()
     
-    # Add current directory to PATH so whisper can find ffmpeg.exe
-    os.environ["PATH"] += os.pathsep + os.path.abspath(".")
+    # Add current directory AND bundle directory to PATH so whisper can find ffmpeg.exe
+    bundle_dir = get_bundle_dir()
+    cwd_dir = os.path.abspath(".")
+    
+    paths = os.environ.get("PATH", "").split(os.pathsep)
+    if cwd_dir not in paths:
+        paths.append(cwd_dir)
+    if bundle_dir not in paths:
+        paths.append(bundle_dir)
+        
+    os.environ["PATH"] = os.pathsep.join(paths)
 
     try:
         import whisper
@@ -109,9 +124,17 @@ def run_transcription(video_file, model_name="medium", output_dir=".", use_fp16=
         import whisper
         from whisper.utils import get_writer
 
+    # Check for CUDA support
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    if device == "cpu" and use_fp16:
+        print("\n[!] WARNING: FP16 is not supported on CPU. Using FP32 instead.")
+        print("[!] To use GPU/FP16, install PyTorch with CUDA support: pip install torch --index-url https://download.pytorch.org/whl/cu121")
+        use_fp16 = False
+
+    print(f"Target Device: {device.upper()}")
     print(f"Loading {model_name} Whisper model...")
     # 'base' model is faster but less accurate. 'medium' or 'large' offers much better translations at the cost of speed/memory.
-    model = whisper.load_model(model_name)
+    model = whisper.load_model(model_name, device=device)
 
     print(f"Transcribing and translating:\n{video_file}...")
     # task='translate' translates from source audio to English
@@ -201,6 +224,24 @@ class DragDropApp(QWidget):
         precision_layout.addLayout(precision_combo_layout)
         precision_layout.setStretch(1, 1)
         main_layout.addLayout(precision_layout)
+        
+        # --- Hardware Status Indicator ---
+        self.hw_layout = QHBoxLayout()
+        cuda_ready = False
+        try:
+            import torch
+            cuda_ready = torch.cuda.is_available()
+        except:
+            pass
+            
+        status_text = "🟢 Hardware Acceleration (CUDA): Available" if cuda_ready else "🔴 Hardware Acceleration (CUDA): NOT FOUND (Using CPU)"
+        status_color = "#28a745" if cuda_ready else "#dc3545"
+        
+        self.hw_label = QLabel(status_text)
+        self.hw_label.setFont(QFont("Arial", 9, QFont.Bold))
+        self.hw_label.setStyleSheet(f"color: {status_color}; padding: 5px; background-color: {status_color}22; border-radius: 4px;")
+        self.hw_layout.addWidget(self.hw_label)
+        main_layout.addLayout(self.hw_layout)
         
         # --- 2. Drag & Drop Area ---
         self.drop_label = QLabel("📄 Drag & Drop a Video File Here")
