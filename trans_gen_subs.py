@@ -30,14 +30,14 @@ except ImportError:
 
 # Automatically install PyQt5 if missing to provide drag and drop GUI
 try:
-    from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QLabel, QComboBox, QLineEdit, QPushButton, QFileDialog, QCheckBox
-    from PyQt5.QtCore import pyqtSignal, QObject, Qt, QMetaObject, Q_ARG
+    from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QLabel, QComboBox, QLineEdit, QPushButton, QFileDialog, QCheckBox, QListWidget, QListWidgetItem, QRadioButton, QButtonGroup, QFrame, QAbstractItemView
+    from PyQt5.QtCore import pyqtSignal, QObject, Qt, QMetaObject, Q_ARG, QSize
     from PyQt5.QtGui import QFont, QColor
 except ImportError:
     print("PyQt5 not found. Installing PyQt5 for GUI drag and drop...")
     subprocess.check_call([sys.executable, "-m", "pip", "install", "PyQt5"])
-    from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QLabel, QComboBox, QLineEdit, QPushButton, QFileDialog, QCheckBox
-    from PyQt5.QtCore import pyqtSignal, QObject, Qt, QMetaObject, Q_ARG
+    from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QTextEdit, QLabel, QComboBox, QLineEdit, QPushButton, QFileDialog, QCheckBox, QListWidget, QListWidgetItem, QRadioButton, QButtonGroup, QFrame, QAbstractItemView
+    from PyQt5.QtCore import pyqtSignal, QObject, Qt, QMetaObject, Q_ARG, QSize
     from PyQt5.QtGui import QFont, QColor
 
 def get_bundle_dir():
@@ -115,7 +115,7 @@ def download_ffmpeg():
             try: shutil.rmtree(temp_dir)
             except: pass
 
-def run_transcription(video_file, model_name="medium", output_dir=".", use_fp16=False, target_device="cuda", initial_prompt=""):
+def run_transcription(video_file, model_name="medium", output_dir=".", use_fp16=False, target_device="cuda", initial_prompt="", base_lang="Translate (English)", multi_lingual=False, target_langs=[], stacked_output=True):
     download_ffmpeg()
     
     # Add current directory AND bundle directory to PATH so whisper can find ffmpeg.exe
@@ -133,11 +133,13 @@ def run_transcription(video_file, model_name="medium", output_dir=".", use_fp16=
     try:
         import whisper
         from whisper.utils import get_writer
+        from deep_translator import GoogleTranslator
     except ImportError:
-        print("Installing openai-whisper...")
-        subprocess.check_call([sys.executable, "-m", "pip", "install", "openai-whisper"])
+        print("Installing openai-whisper and deep-translator...")
+        subprocess.check_call([sys.executable, "-m", "pip", "install", "openai-whisper", "deep-translator"])
         import whisper
         from whisper.utils import get_writer
+        from deep_translator import GoogleTranslator
 
     # Check for CUDA support and apply user choice
     if use_fp16:
@@ -161,14 +163,51 @@ def run_transcription(video_file, model_name="medium", output_dir=".", use_fp16=
     model = whisper.load_model(model_name, device=device)
 
     print(f"Transcribing and translating:\n{video_file}...")
-    # task='translate' translates from source audio to English
-    # verbose=True automatically prints translation lines step-by-step
-    # initial_prompt provides context to help with proper names and jargon
-    result = model.transcribe(video_file, language='ja', task='translate', verbose=True, fp16=use_fp16, initial_prompt=initial_prompt)
+    task_mode = 'translate' if base_lang == "Translate (English)" else 'transcribe'
+    result = model.transcribe(video_file, language='ja', task=task_mode, verbose=True, fp16=use_fp16, initial_prompt=initial_prompt)
 
-    print("Writing subtitle file...")
     writer = get_writer("srt", output_dir)
-    writer(result, video_file, {})
+    
+    if multi_lingual and len(target_langs) > 0:
+        print("\nApplying Multi-lingual translations using deep-translator...")
+        import copy
+        
+        if stacked_output:
+            for segment in result['segments']:
+                base_text = segment['text'].strip()
+                translated_lines = [base_text]
+                for code, lang_name in target_langs:
+                    try:
+                        t_text = GoogleTranslator(source='auto', target=code).translate(base_text)
+                        translated_lines.append(t_text)
+                    except Exception as e:
+                        print(f"  [!] Failed to translate to {lang_name}: {e}")
+                segment['text'] = "\n".join(translated_lines)
+            
+            print("Writing Stacked subtitle file...")
+            writer(result, video_file, {})
+        else:
+            print(f"Writing base subtitle file...")
+            writer(result, video_file, {})
+            
+            base_filename = os.path.basename(video_file)
+            name_only, _ = os.path.splitext(base_filename)
+            
+            for code, lang_name in target_langs:
+                print(f"Translating {lang_name} subtitles...")
+                cloned_result = copy.deepcopy(result)
+                for segment in cloned_result['segments']:
+                    try:
+                        segment['text'] = GoogleTranslator(source='auto', target=code).translate(segment['text'].strip())
+                    except Exception:
+                        pass
+                
+                # Use a dummy audio path to force writer to use the correct name
+                dummy_audio = os.path.join(os.path.dirname(video_file), f"{name_only}_{code}.mp4")
+                writer(cloned_result, dummy_audio, {})
+    else:
+        print("Writing subtitle file...")
+        writer(result, video_file, {})
 
     print(f"\nDone! Subtitles saved to {output_dir}")
 
@@ -332,6 +371,85 @@ class DragDropApp(QWidget):
         
         main_layout.addLayout(prompt_layout)
         
+        # --- 2.5 Multi-Lingual Output Area ---
+        multi_layout = QVBoxLayout()
+        multi_layout.setSpacing(5)
+        
+        # Base Output Language
+        base_lang_layout = QHBoxLayout()
+        self.base_lang_label = QLabel("🎯 Output Lang:")
+        self.base_lang_label.setFont(QFont("Arial", 11))
+        self.base_lang_combo = QComboBox()
+        self.base_lang_combo.addItems(["Translate (English)", "Transcribe (Original Spoken)"])
+        self.base_lang_combo.setStyleSheet("padding: 6px; border: 1px solid #cce0ff; border-radius: 5px; background-color: #e6f2ff;")
+        base_lang_layout.addWidget(self.base_lang_label)
+        base_lang_layout.addWidget(self.base_lang_combo)
+        base_lang_layout.addStretch()
+        multi_layout.addLayout(base_lang_layout)
+        
+        # Checkbox
+        self.multi_check = QCheckBox("multi-lingual")
+        self.multi_check.setFont(QFont("Arial", 10, QFont.Bold))
+        self.multi_check.toggled.connect(self.toggle_multi_lingual)
+        multi_layout.addWidget(self.multi_check)
+        
+        # Multi-Lingual Container
+        self.multi_frame = QFrame()
+        self.multi_frame.setStyleSheet("QFrame { background-color: #f0f4f8; border-radius: 8px; border: 1px solid #d0e0f0; }")
+        self.multi_frame.setVisible(False)
+        frame_layout = QVBoxLayout(self.multi_frame)
+        
+        # Combo & Add Button
+        add_lang_layout = QHBoxLayout()
+        self.lang_picker = QComboBox()
+        # Top 15 Languages mapped with deep_translator codes
+        self.available_langs = {
+            "Spanish": "es", "French": "fr", "German": "de", "Italian": "it", 
+            "Indonesian": "id", "Japanese": "ja", "Chinese (Simplified)": "zh-CN",
+            "Korean": "ko", "Russian": "ru", "Portuguese": "pt", "Arabic": "ar",
+            "Hindi": "hi", "Thai": "th", "Turkish": "tr", "Vietnamese": "vi"
+        }
+        self.lang_picker.addItems(list(self.available_langs.keys()))
+        self.lang_picker.setStyleSheet("padding: 5px; background: white; border: 1px solid #ccc; border-radius: 4px;")
+        
+        self.add_lang_btn = QPushButton("Add")
+        self.add_lang_btn.setStyleSheet("padding: 5px 15px; background-color: #0078D7; color: white; font-weight: bold; border-radius: 4px;")
+        self.add_lang_btn.clicked.connect(self.add_language_to_list)
+        
+        add_lang_layout.addWidget(self.lang_picker)
+        add_lang_layout.addWidget(self.add_lang_btn)
+        frame_layout.addLayout(add_lang_layout)
+        
+        # List Widget
+        self.lang_list = QListWidget()
+        self.lang_list.setDragDropMode(QAbstractItemView.InternalMove)
+        self.lang_list.setMaximumHeight(100)
+        self.lang_list.setStyleSheet("background: white; border: 1px solid #ccc; border-radius: 4px;")
+        frame_layout.addWidget(self.lang_list)
+        
+        # Radio buttons
+        radio_layout = QVBoxLayout()
+        self.radio_group = QButtonGroup(self)
+        
+        self.radio_sep = QRadioButton("Separate .srt files")
+        self.radio_sep.setFont(QFont("Arial", 9))
+        self.radio_sep.setStyleSheet("border: none; background: transparent;")
+        
+        self.radio_stack = QRadioButton("Stacked single .srt file")
+        self.radio_stack.setFont(QFont("Arial", 9))
+        self.radio_stack.setChecked(True)
+        self.radio_stack.setStyleSheet("border: none; background: transparent;")
+        
+        self.radio_group.addButton(self.radio_sep)
+        self.radio_group.addButton(self.radio_stack)
+        
+        radio_layout.addWidget(self.radio_sep)
+        radio_layout.addWidget(self.radio_stack)
+        frame_layout.addLayout(radio_layout)
+        
+        multi_layout.addWidget(self.multi_frame)
+        main_layout.addLayout(multi_layout)
+        
         # --- 3. Drag & Drop Area ---
         self.drop_label = QLabel("📄 Drag & Drop a Video File Here")
         self.drop_label.setAlignment(Qt.AlignCenter)
@@ -431,6 +549,47 @@ class DragDropApp(QWidget):
             self.device_combo.setEnabled(True)
             self.device_combo.setStyleSheet("padding: 6px; border: 1px solid #cce0ff; border-radius: 5px; background-color: #e6f2ff; color: #333;")
 
+    def toggle_multi_lingual(self, checked):
+        self.multi_frame.setVisible(checked)
+
+    def add_language_to_list(self):
+        lang_name = self.lang_picker.currentText()
+        # Prevent duplicates
+        for i in range(self.lang_list.count()):
+            item = self.lang_list.item(i)
+            widget = self.lang_list.itemWidget(item)
+            if widget and widget.property("lang_name") == lang_name:
+                return
+
+        item = QListWidgetItem(self.lang_list)
+        item.setSizeHint(QSize(0, 30))
+        
+        row_widget = QWidget()
+        row_widget.setProperty("lang_name", lang_name)
+        row_layout = QHBoxLayout(row_widget)
+        row_layout.setContentsMargins(5, 0, 5, 0)
+        
+        drag_icon = QLabel("↕️")
+        drag_icon.setStyleSheet("color: #888; font-weight: bold;")
+        name_label = QLabel(lang_name)
+        name_label.setStyleSheet("color: #333; font-weight: bold;")
+        
+        del_btn = QPushButton("❌")
+        del_btn.setFixedSize(24, 24)
+        del_btn.setStyleSheet("border: none; background: transparent; color: red;")
+        del_btn.clicked.connect(lambda _, it=item: self.remove_lang_row(it))
+        
+        row_layout.addWidget(drag_icon)
+        row_layout.addWidget(name_label)
+        row_layout.addStretch()
+        row_layout.addWidget(del_btn)
+        
+        self.lang_list.setItemWidget(item, row_widget)
+        
+    def remove_lang_row(self, item):
+        row = self.lang_list.row(item)
+        self.lang_list.takeItem(row)
+
     def start_generation(self):
         if not self.target_video_file:
             return
@@ -441,17 +600,29 @@ class DragDropApp(QWidget):
         target_device = self.device_combo.currentData()
         prompt_text = self.prompt_input.toPlainText().strip()
         
+        base_lang = self.base_lang_combo.currentText()
+        is_multi = self.multi_check.isChecked()
+        is_stacked = self.radio_stack.isChecked()
+        
+        target_langs = []
+        if is_multi:
+            for i in range(self.lang_list.count()):
+                widget = self.lang_list.itemWidget(self.lang_list.item(i))
+                name = widget.property("lang_name")
+                code = self.available_langs.get(name, "en")
+                target_langs.append((code, name))
+        
         self.start_btn.setEnabled(False)
         self.start_btn.setText("Generating... (Check console below)")
         self.start_btn.setStyleSheet("padding: 12px; background-color: #aaaaaa; color: white; border: none; border-radius: 6px;")
         
         print(f"\n{'='*50}\nStarting: {os.path.basename(self.target_video_file)}\nModel: {model_choice}\nOutput: {out_dir}\nFP16: {use_fp16}\nDevice: {target_device}\nPrompt: {prompt_text if prompt_text else 'None'}\n{'='*50}\n")
         
-        threading.Thread(target=self.process_file, args=(self.target_video_file, model_choice, out_dir, use_fp16, target_device, prompt_text), daemon=True).start()
+        threading.Thread(target=self.process_file, args=(self.target_video_file, model_choice, out_dir, use_fp16, target_device, prompt_text, base_lang, is_multi, target_langs, is_stacked), daemon=True).start()
 
-    def process_file(self, file_path, model_choice, out_dir, use_fp16, target_device, prompt_text):
+    def process_file(self, file_path, model_choice, out_dir, use_fp16, target_device, prompt_text, base_lang, is_multi, target_langs, is_stacked):
         try:
-            run_transcription(file_path, model_choice, out_dir, use_fp16, target_device, prompt_text)
+            run_transcription(file_path, model_choice, out_dir, use_fp16, target_device, prompt_text, base_lang, is_multi, target_langs, is_stacked)
         except Exception as e:
             print(f"Error occurred: {e}")
         finally:
