@@ -115,7 +115,7 @@ def download_ffmpeg():
             try: shutil.rmtree(temp_dir)
             except: pass
 
-def run_transcription(video_file, model_name="medium", output_dir=".", use_fp16=False, target_device="cuda"):
+def run_transcription(video_file, model_name="medium", output_dir=".", use_fp16=False, target_device="cuda", initial_prompt=""):
     download_ffmpeg()
     
     # Add current directory AND bundle directory to PATH so whisper can find ffmpeg.exe
@@ -163,7 +163,8 @@ def run_transcription(video_file, model_name="medium", output_dir=".", use_fp16=
     print(f"Transcribing and translating:\n{video_file}...")
     # task='translate' translates from source audio to English
     # verbose=True automatically prints translation lines step-by-step
-    result = model.transcribe(video_file, language='ja', task='translate', verbose=True, fp16=use_fp16)
+    # initial_prompt provides context to help with proper names and jargon
+    result = model.transcribe(video_file, language='ja', task='translate', verbose=True, fp16=use_fp16, initial_prompt=initial_prompt)
 
     print("Writing subtitle file...")
     writer = get_writer("srt", output_dir)
@@ -305,8 +306,33 @@ class DragDropApp(QWidget):
         precision_layout.setStretch(1, 1)
         precision_layout.setStretch(3, 1)
         main_layout.addLayout(precision_layout)
+
+        # --- 2. Prompt / Context Area ---
+        prompt_layout = QVBoxLayout()
+        prompt_layout.setSpacing(5)
         
-        # --- 2. Drag & Drop Area ---
+        prompt_title_layout = QHBoxLayout()
+        self.prompt_label = QLabel("📝 Context / Keywords (Optional) :")
+        self.prompt_label.setFont(QFont("Arial", 11))
+        self.prompt_label.setStyleSheet("color: #333;")
+        prompt_title_layout.addWidget(self.prompt_label)
+        
+        self.prompt_info_btn = QLabel("ℹ️")
+        self.prompt_info_btn.setToolTip("Add proper names, specialized jargon, or preferred punctuation style to help the AI be more accurate.")
+        self.prompt_info_btn.setStyleSheet("color: #0078D7; font-weight: bold;")
+        prompt_title_layout.addWidget(self.prompt_info_btn)
+        prompt_title_layout.addStretch()
+        prompt_layout.addLayout(prompt_title_layout)
+        
+        self.prompt_input = QTextEdit()
+        self.prompt_input.setPlaceholderText("Prompt under 50 words or phrases such as names, places, nouns, jargons, common phrase in the video, etc.\ne.g. Malenia, Ynysybwl, colonel, carcinisation, coup de grâce, etc.")
+        self.prompt_input.setMaximumHeight(60)
+        self.prompt_input.setStyleSheet("padding: 8px; border: 1px solid #cce0ff; border-radius: 5px; background-color: #ffffff; color: #333;")
+        prompt_layout.addWidget(self.prompt_input)
+        
+        main_layout.addLayout(prompt_layout)
+        
+        # --- 3. Drag & Drop Area ---
         self.drop_label = QLabel("📄 Drag & Drop a Video File Here")
         self.drop_label.setAlignment(Qt.AlignCenter)
         self.drop_label.setFont(QFont("Arial", 14, QFont.Bold))
@@ -411,20 +437,21 @@ class DragDropApp(QWidget):
             
         model_choice = self.model_combo.currentText()
         out_dir = self.loc_input.text()
-        use_fp16 = self.precision_combo.currentText() == "FP16"
+        use_fp16 = self.precision_combo.currentText() == "FP16" or "FP16" in self.precision_combo.currentText()
         target_device = self.device_combo.currentData()
+        prompt_text = self.prompt_input.toPlainText().strip()
         
         self.start_btn.setEnabled(False)
         self.start_btn.setText("Generating... (Check console below)")
         self.start_btn.setStyleSheet("padding: 12px; background-color: #aaaaaa; color: white; border: none; border-radius: 6px;")
         
-        print(f"\n{'='*50}\nStarting: {os.path.basename(self.target_video_file)}\nModel: {model_choice}\nOutput: {out_dir}\nFP16: {use_fp16}\nDevice: {target_device}\n{'='*50}\n")
+        print(f"\n{'='*50}\nStarting: {os.path.basename(self.target_video_file)}\nModel: {model_choice}\nOutput: {out_dir}\nFP16: {use_fp16}\nDevice: {target_device}\nPrompt: {prompt_text if prompt_text else 'None'}\n{'='*50}\n")
         
-        threading.Thread(target=self.process_file, args=(self.target_video_file, model_choice, out_dir, use_fp16, target_device), daemon=True).start()
+        threading.Thread(target=self.process_file, args=(self.target_video_file, model_choice, out_dir, use_fp16, target_device, prompt_text), daemon=True).start()
 
-    def process_file(self, file_path, model_choice, out_dir, use_fp16, target_device):
+    def process_file(self, file_path, model_choice, out_dir, use_fp16, target_device, prompt_text):
         try:
-            run_transcription(file_path, model_choice, out_dir, use_fp16, target_device)
+            run_transcription(file_path, model_choice, out_dir, use_fp16, target_device, prompt_text)
         except Exception as e:
             print(f"Error occurred: {e}")
         finally:
